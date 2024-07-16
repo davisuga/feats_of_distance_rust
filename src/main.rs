@@ -10,14 +10,14 @@ pub mod types;
 use redis::AsyncCommands;
 use reqwest::{self};
 use scylla::SessionBuilder;
-use std::{collections::HashSet, time::Instant};
-use tokio::{self};
+use task::{complete_task, dequeue_task, enqueue_tasks, setup_task_table, ArtistTask};
+use std::{collections::HashSet, time::{Duration, Instant}};
+use tokio::{self, time::interval};
 use types::{Album, NormalizedTrack, Track};
 pub mod fetch;
 use std::error::Error;
 async fn process_artist(
     artist_id: &str,
-    channel: &Channel,
     redis_client: &mut redis::aio::Connection,
     session: &scylla::Session,
     auth_token: &str,
@@ -66,18 +66,7 @@ async fn process_artist(
     
     // Send unprocessed artists to RabbitMQ
     let before = Instant::now();
-    
-    for artist_id in &unprocessed_artists {
-        channel
-            .basic_publish(
-                "",
-                "artist_queue",
-                BasicPublishOptions::default(),
-                artist_id.as_bytes().to_vec(),
-                BasicProperties::default(),
-            )
-            .await;
-    }
+    enqueue_tasks(&session, unprocessed_artists.to_owned().into_iter().cloned().collect()).await?;
     println!("Published artists to process in {:?}", before.elapsed());
     println!(
         "Published artists to process: {:?}",
@@ -102,32 +91,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )
     .await?;
     println!("Connected to RabbitMQ");
-    let channel = conn.create_channel().await?;
-    let _queue = channel
-        .queue_declare(
-            "artist_queue",
-            QueueDeclareOptions {
-                durable: true,
-                ..QueueDeclareOptions::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
 
     // Redis setup
     let redis_client = redis::Client::open(std::env::var("REDIS_URI").unwrap().as_str())?;
     let mut redis_conn = redis_client.get_async_connection().await?;
     println!("Redis client created");
     // Consume messages
-    let consumer = channel
-        .basic_consume(
-            "artist_queue",
-            "consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await?;
-    println!("Consuming messages");
+
     let uri = std::env::var("SCYLLA_URI").unwrap();
 
     let session: scylla::Session = SessionBuilder::new().known_node(uri).build().await?;
@@ -135,30 +105,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let http_client = get_client();
     let mut last_token = get_api_key(&http_client).await?;
     setup_keyspace(&session).await?;
+    setup_task_table(&session).await?;
+    let mut interval = interval(Duration::from_millis(500));
+    loop {
+        interval.tick().await;
+        let unprocessed_artists = dequeue_task(&session).await?;
+        if let Some(ArtistTask {artist_id, ..}) = unprocessed_artists {
+            let now = Instant::now();
+            if now.duration_since(last_token_timestamp).as_secs() > 3500 {
+                last_token = get_api_key(&http_client).await?;
+                last_token_timestamp = now;
+            }
 
-    while let Some(delivery) = consumer.clone().into_iter().next() {
-        let (channel, delivery) = delivery.expect("Error consuming message");
-        let artist_id = String::from_utf8_lossy(&delivery.data);
-        let now = Instant::now();
-        if now.duration_since(last_token_timestamp).as_secs() > 3500 {
-            last_token = get_api_key(&http_client).await?;
-            last_token_timestamp = now;
+            if let Err(e) = process_artist(&artist_id, &mut redis_conn, &session, &last_token, &http_client).await {
+                eprintln!("Error processing artist {}: {:?}", artist_id, e);
+                // Requeue the message
+                enqueue_tasks(&session, vec![artist_id]).await?;
+            } else {
+                complete_task(&session, &artist_id).await?;
+                println!("processed in {:?}", now.elapsed());
+                
+            }
         }
-        if let Err(e) = process_artist(&artist_id, &channel, &mut redis_conn, &session, &last_token, &http_client).await {
-            eprintln!("Error processing artist {}: {:?}", artist_id, e);
-            // Requeue the message
-            delivery
-            .nack(BasicNackOptions::default())
-            .await
-            .expect("Nack message");
-        } else {
-            delivery
-            .ack(BasicAckOptions::default())
-            .await
-            .expect("Acknowledge message");
-            println!("Acknowledged message");
-        }
-        
     }
-    Ok(())
 }

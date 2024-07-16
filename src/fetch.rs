@@ -60,7 +60,7 @@ use serde_json::{json, Value};
 use crate::types::Track;
 
 
-const CONCURRENT_REQUESTS: usize = 8;
+const CONCURRENT_REQUESTS: usize = 16;
 const TRACKS_LIMIT: usize = 20;
 
 pub async fn fetch_albums_with_tracks(

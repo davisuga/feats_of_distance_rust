@@ -1,11 +1,11 @@
 
-use scylla::{IntoTypedRows, Session, SessionBuilder};
+use scylla::{batch::Batch, IntoTypedRows, Session, SessionBuilder};
 
 // Updated struct to represent our task in ScyllaDB
 #[derive(Debug)]
 pub struct ArtistTask {
-    artist_id: String,
-    status: String,
+    pub artist_id: String,
+    pub status: String,
 }
 
 pub async fn setup_task_table(session: &Session) -> Result<(), Box<dyn std::error::Error>> {
@@ -19,11 +19,13 @@ pub async fn setup_task_table(session: &Session) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-pub async fn enqueue_task(session: &Session, artist_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    session.query(
-        "INSERT INTO music.artist_tasks (artist_id, status) VALUES (?, ?) IF NOT EXISTS",
-        (artist_id, "pending"),
-    ).await?;
+pub async fn enqueue_tasks(session: &Session, artist_ids: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut batch = Batch::default();
+    for _ in artist_ids.clone() {
+        batch.append_statement("INSERT INTO music.artist_tasks (artist_id, status) VALUES (?, ?)"); 
+    }
+    let statuses = artist_ids.iter().map(|artist_id| (artist_id,"pending")).collect::<Vec<_>>();
+    session.batch(&mut batch, statuses).await?;
     Ok(())
 }
 
