@@ -5,6 +5,7 @@ use lapin::{
     options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties,
 };
 pub mod db;
+pub mod task;
 pub mod types;
 use redis::AsyncCommands;
 use reqwest::{self};
@@ -75,7 +76,7 @@ async fn process_artist(
                 artist_id.as_bytes().to_vec(),
                 BasicProperties::default(),
             )
-            .await?;
+            .await;
     }
     println!("Published artists to process in {:?}", before.elapsed());
     println!(
@@ -94,11 +95,13 @@ async fn process_artist(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // RabbitMQ setup
+    println!("Connecting to RabbitMQ");
     let conn = Connection::connect(
         std::env::var("RABBITMQ_URI").unwrap().as_str(),
         ConnectionProperties::default(),
     )
     .await?;
+    println!("Connected to RabbitMQ");
     let channel = conn.create_channel().await?;
     let _queue = channel
         .queue_declare(
@@ -143,11 +146,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         if let Err(e) = process_artist(&artist_id, &channel, &mut redis_conn, &session, &last_token, &http_client).await {
             eprintln!("Error processing artist {}: {:?}", artist_id, e);
+            // Requeue the message
+            delivery
+            .nack(BasicNackOptions::default())
+            .await
+            .expect("Nack message");
         } else {
             delivery
             .ack(BasicAckOptions::default())
             .await
             .expect("Acknowledge message");
+            println!("Acknowledged message");
         }
         
     }
