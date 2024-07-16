@@ -24,7 +24,17 @@ async fn process_artist(
     client: &reqwest::Client,
 ) -> Result<(), Box<dyn Error>> {
     println!("Processing artist {:?}", artist_id);
-    
+    let lock_key = format!("lock:artist:{}", artist_id);
+    let lock_result: bool = redis_client.set_nx(&lock_key, "locked").await?;
+
+    if !lock_result {
+        println!("Artist {} is already being processed by another instance", artist_id);
+        return Ok(());
+    }
+
+    // Set expiration to prevent dead locks
+    redis_client.expire(&lock_key, 30).await?;
+
 
     // Fetch albums
     let albums_url = format!("{}/artists/{}/albums?limit=50", SPOTIFY_API_BASE, artist_id);
@@ -76,6 +86,7 @@ async fn process_artist(
     // Mark initial artist as processed in Redis
     let before = Instant::now();
     redis_client.sadd("processed_artists", artist_id).await?;
+    redis_client.del(&lock_key).await?;
     println!("Marked artist {:?} as processed in {:?}", artist_id, before.elapsed());
 
     Ok(())
