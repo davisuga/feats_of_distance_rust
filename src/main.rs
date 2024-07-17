@@ -1,9 +1,8 @@
 use db::{insert_data, setup_keyspace};
 use fetch::{fetch_albums_with_tracks, fetch_all_items, get_api_key, get_client, SPOTIFY_API_BASE};
 use itertools::Itertools;
-use lapin::{
-    options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties,
-};
+
+pub mod batch;
 pub mod db;
 pub mod task;
 pub mod types;
@@ -95,14 +94,14 @@ async fn process_artist(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // RabbitMQ setup
-    println!("Connecting to RabbitMQ");
-    let conn = Connection::connect(
-        std::env::var("RABBITMQ_URI").unwrap().as_str(),
-        ConnectionProperties::default(),
-    )
-    .await?;
-    println!("Connected to RabbitMQ");
-
+    // println!("Connecting to RabbitMQ");
+    // let conn = Connection::connect(
+    //     std::env::var("RABBITMQ_URI").unwrap().as_str(),
+    //     ConnectionProperties::default(),
+    // )
+    // .await?;
+    // println!("Connected to RabbitMQ");
+    
     // Redis setup
     let redis_client = redis::Client::open(std::env::var("REDIS_URI").unwrap().as_str())?;
     let mut redis_conn = redis_client.get_async_connection().await?;
@@ -115,8 +114,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut last_token_timestamp = Instant::now();
     let http_client = get_client();
     let mut last_token = get_api_key(&http_client).await?;
+    println!("Got token {:?}", last_token);
     setup_keyspace(&session).await?;
+    println!("Created keyspace");
     setup_task_table(&session).await?;
+    println!("Created task table");
     let mut interval = interval(Duration::from_millis(500));
     loop {
         interval.tick().await;
