@@ -1,18 +1,21 @@
 use db::{insert_data, setup_keyspace};
 use fetch::{fetch_albums_with_tracks, fetch_all_items, get_api_key, get_client, SPOTIFY_API_BASE};
 use itertools::Itertools;
-
+pub mod parquet;
 pub mod batch;
 pub mod db;
 pub mod task;
 pub mod types;
 use redis::AsyncCommands;
 use reqwest::{self};
-use scylla::SessionBuilder;
+use scylla::{statement::Consistency, ExecutionProfile, SessionBuilder};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 use task::{complete_task, dequeue_task, enqueue_tasks, setup_task_table, ArtistTask};
-use std::{collections::HashSet, time::{Duration, Instant}};
 use tokio::{self, time::interval};
-use types::{Album, NormalizedTrack, Track};
+use types::{Album, Artist, NormalizedTrack, Track};
 pub mod fetch;
 use std::error::Error;
 async fn process_artist(
@@ -27,13 +30,15 @@ async fn process_artist(
     let lock_result: bool = redis_client.set_nx(&lock_key, "locked").await?;
 
     if !lock_result {
-        println!("Artist {} is already being processed by another instance", artist_id);
+        println!(
+            "Artist {} is already being processed by another instance",
+            artist_id
+        );
         return Ok(());
     }
 
     // Set expiration to prevent dead locks
     redis_client.expire(&lock_key, 30).await?;
-
 
     // Fetch albums
     let albums_url = format!("{}/artists/{}/albums?limit=50", SPOTIFY_API_BASE, artist_id);
@@ -72,10 +77,18 @@ async fn process_artist(
     let processed_artists: HashSet<String> = redis_client.smembers("processed_artists").await?;
     println!("Fetched processed artists in {:?}", before.elapsed());
     let unprocessed_artists: HashSet<_> = artist_id_set.difference(&processed_artists).collect();
-    
+
     // Send unprocessed artists to RabbitMQ
     let before = Instant::now();
-    enqueue_tasks(&session, unprocessed_artists.to_owned().into_iter().cloned().collect()).await?;
+    enqueue_tasks(
+        &session,
+        unprocessed_artists
+            .to_owned()
+            .into_iter()
+            .cloned()
+            .collect(),
+    )
+    .await?;
     println!("Published artists to process in {:?}", before.elapsed());
     println!(
         "Published artists to process: {:?}",
@@ -86,13 +99,46 @@ async fn process_artist(
     let before = Instant::now();
     redis_client.sadd("processed_artists", artist_id).await?;
     redis_client.del(&lock_key).await?;
-    println!("Marked artist {:?} as processed in {:?}", artist_id, before.elapsed());
+    println!(
+        "Marked artist {:?} as processed in {:?}",
+        artist_id,
+        before.elapsed()
+    );
 
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+
+    let uri = std::env::var("SCYLLA_URI").unwrap();
+
+    let profile = ExecutionProfile::builder()
+        .consistency(Consistency::One)
+        .request_timeout(None) // no request timeout
+        .build();
+
+    let handle = profile.into_handle();
+
+    let session: scylla::Session = SessionBuilder::new()
+        .default_execution_profile_handle(handle)
+        .known_node(uri)
+        .build()
+        .await?;
+
+    let all_tracks = std::fs::read_to_string("tracks.json").expect("  failed to read file");
+    let all_tracks: Vec<NormalizedTrack> = serde_json::from_str(&all_tracks).expect("  failed to parse json");
+    let all_artists = std::fs::read_to_string("artists.json").expect("  failed to read file");
+    let all_artists: Vec<Artist> = serde_json::from_str(&all_artists).expect("  failed to parse json");
+    let mut total_time = 0.0;
+    for _ in 0..20 {
+        let before = Instant::now();
+    insert_data(&all_tracks, &all_artists, &session).await?;
+
+        total_time += before.elapsed().as_secs_f64();
+    }
+    println!("Average time: {:?}", total_time / 20.0);
+    return Ok(());
     // RabbitMQ setup
     // println!("Connecting to RabbitMQ");
     // let conn = Connection::connect(
@@ -101,16 +147,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // )
     // .await?;
     // println!("Connected to RabbitMQ");
-    
+
     // Redis setup
     let redis_client = redis::Client::open(std::env::var("REDIS_URI").unwrap().as_str())?;
     let mut redis_conn = redis_client.get_async_connection().await?;
     println!("Redis client created");
     // Consume messages
 
-    let uri = std::env::var("SCYLLA_URI").unwrap();
 
-    let session: scylla::Session = SessionBuilder::new().known_node(uri).build().await?;
     let mut last_token_timestamp = Instant::now();
     let http_client = get_client();
     let mut last_token = get_api_key(&http_client).await?;
@@ -119,25 +163,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Created keyspace");
     setup_task_table(&session).await?;
     println!("Created task table");
+
     let mut interval = interval(Duration::from_millis(500));
     loop {
         interval.tick().await;
         let unprocessed_artists = dequeue_task(&session).await?;
-        if let Some(ArtistTask {artist_id, ..}) = unprocessed_artists {
+        if let Some(ArtistTask { artist_id, .. }) = unprocessed_artists {
             let now = Instant::now();
             if now.duration_since(last_token_timestamp).as_secs() > 3500 {
                 last_token = get_api_key(&http_client).await?;
                 last_token_timestamp = now;
             }
 
-            if let Err(e) = process_artist(&artist_id, &mut redis_conn, &session, &last_token, &http_client).await {
+            if let Err(e) = process_artist(
+                &artist_id,
+                &mut redis_conn,
+                &session,
+                &last_token,
+                &http_client,
+            )
+            .await
+            {
                 eprintln!("Error processing artist {}: {:?}", artist_id, e);
                 // Requeue the message
                 enqueue_tasks(&session, vec![artist_id]).await?;
             } else {
                 complete_task(&session, &artist_id).await?;
                 println!("processed in {:?}", now.elapsed());
-                
             }
         }
     }

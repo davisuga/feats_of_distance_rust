@@ -1,10 +1,7 @@
 use futures::future::join_all;
 use itertools::Itertools;
 use scylla::{
-    batch::{Batch, BatchStatement},
-    serialize::{batch::BatchValues, row::SerializeRow},
-    transport::errors::QueryError,
-    QueryResult, Session,
+    batch::{Batch, BatchStatement}, serialize::{batch::BatchValues, row::SerializeRow}, statement::Consistency, transport::errors::QueryError, QueryResult, Session
 };
 
 pub async fn chunked_parallel_batch<T, S>(
@@ -22,6 +19,7 @@ where
 
     let futures = chunks.into_iter().map(|chunk| {
         let mut batch = Batch::default();
+        batch.set_consistency(Consistency::Any);
         for _ in chunk {
             batch.append_statement(statement);
         }
