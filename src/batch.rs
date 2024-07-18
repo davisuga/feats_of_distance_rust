@@ -16,10 +16,22 @@ where
     const CHUNK_SIZE: usize = 700;
 
     let chunks: Vec<_> = values.chunks(CHUNK_SIZE).collect();
-
+    let consistency = std::env::var("CONSISTENCY").unwrap_or("any".to_string());
+    let consistency = match consistency.as_str() {
+        "any" => Consistency::Any,
+        "one" => Consistency::One,
+        "two" => Consistency::Two,
+        "three" => Consistency::Three,
+        "quorum" => Consistency::Quorum,
+        "all" => Consistency::All,
+        "local_quorum" => Consistency::LocalQuorum,
+        "each_quorum" => Consistency::EachQuorum,
+        "local_one" => Consistency::LocalOne,
+        _ => Consistency::Any,
+    };
     let futures = chunks.into_iter().map(|chunk| {
         let mut batch = Batch::default();
-        batch.set_consistency(Consistency::Any);
+        batch.set_consistency(consistency);
         for _ in chunk {
             batch.append_statement(statement);
         }
