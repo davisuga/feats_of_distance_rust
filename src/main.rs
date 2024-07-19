@@ -125,28 +125,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .known_node(uri)
         .build()
         .await?;
+    if let Ok(_) = std::env::var("TEST") {
+        let all_tracks = std::fs::read_to_string("tracks.json").expect("  failed to read file");
+        let all_tracks: Vec<NormalizedTrack> = serde_json::from_str(&all_tracks).expect("  failed to parse json");
+        let all_artists = std::fs::read_to_string("artists.json").expect("  failed to read file");
+        let all_artists: Vec<Artist> = serde_json::from_str(&all_artists).expect("  failed to parse json");
+        let mut total_time = 0.0;
+        for _ in 0..20 {
+            let before = Instant::now();
+        insert_data(&all_tracks, &all_artists, &session).await?;
+    
+            total_time += before.elapsed().as_secs_f64();
+        }
+        println!("Average time: {:?}", total_time / 20.0);
+        return Ok(());
+    };
 
-    let all_tracks = std::fs::read_to_string("tracks.json").expect("  failed to read file");
-    let all_tracks: Vec<NormalizedTrack> = serde_json::from_str(&all_tracks).expect("  failed to parse json");
-    let all_artists = std::fs::read_to_string("artists.json").expect("  failed to read file");
-    let all_artists: Vec<Artist> = serde_json::from_str(&all_artists).expect("  failed to parse json");
-    let mut total_time = 0.0;
-    for _ in 0..20 {
-        let before = Instant::now();
-    insert_data(&all_tracks, &all_artists, &session).await?;
-
-        total_time += before.elapsed().as_secs_f64();
-    }
-    println!("Average time: {:?}", total_time / 20.0);
-    return Ok(());
-    // RabbitMQ setup
-    // println!("Connecting to RabbitMQ");
-    // let conn = Connection::connect(
-    //     std::env::var("RABBITMQ_URI").unwrap().as_str(),
-    //     ConnectionProperties::default(),
-    // )
-    // .await?;
-    // println!("Connected to RabbitMQ");
 
     // Redis setup
     let redis_client = redis::Client::open(std::env::var("REDIS_URI").unwrap().as_str())?;
@@ -164,9 +158,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     setup_task_table(&session).await?;
     println!("Created task table");
 
-    let mut interval = interval(Duration::from_millis(500));
+    let mut interval = interval(Duration::from_millis(1000));
     loop {
-        interval.tick().await;
         let unprocessed_artists = dequeue_task(&session).await?;
         if let Some(ArtistTask { artist_id, .. }) = unprocessed_artists {
             let now = Instant::now();
@@ -191,6 +184,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 complete_task(&session, &artist_id).await?;
                 println!("processed in {:?}", now.elapsed());
             }
+        } else {
+            interval.tick().await;
         }
     }
 }
