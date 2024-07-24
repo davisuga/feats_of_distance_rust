@@ -12,7 +12,8 @@ pub async fn setup_task_table(session: &Session) -> Result<(), Box<dyn std::erro
     session.query(
         "CREATE TABLE IF NOT EXISTS music.artist_tasks (
             artist_id text PRIMARY KEY,
-            status text
+            status text,
+            created_at timestamp
         )",
         &[],
     ).await?;

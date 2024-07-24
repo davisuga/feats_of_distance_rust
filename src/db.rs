@@ -35,12 +35,12 @@ pub async fn setup_keyspace(session: &scylla::Session) -> Result<(), Box<dyn Err
     prepared.set_consistency(Consistency::All);
     session.execute(&prepared, ()).await?;
     // Create the music.tracks table
-    let mut prepared = session.prepare("CREATE TABLE IF NOT EXISTS music.tracks (id text, name text, preview_url text, artists list<text>, PRIMARY KEY (id))").await?;
+    let mut prepared = session.prepare("CREATE TABLE IF NOT EXISTS music.tracks (id text, created_at timestamp, name text, preview_url text, artists list<text>, PRIMARY KEY (id))").await?;
     prepared.set_consistency(Consistency::All);
     session.execute(&prepared, ()).await?;
     // Create the music.artists table
     let mut prepared = session
-        .prepare("CREATE TABLE IF NOT EXISTS music.artists (id text, name text, PRIMARY KEY (id))")
+        .prepare("CREATE TABLE IF NOT EXISTS music.artists (id text, created_at timestamp, name text, PRIMARY KEY (id))")
         .await?;
     prepared.set_consistency(Consistency::All);
     session.execute(&prepared, ()).await?;
