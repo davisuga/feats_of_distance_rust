@@ -1,191 +1,171 @@
-use db::{insert_data, setup_keyspace};
-use fetch::{fetch_albums_with_tracks, fetch_all_items, get_api_key, get_client, SPOTIFY_API_BASE};
-use itertools::Itertools;
-pub mod parquet;
+use fred::prelude::*;
+use ntex::web;
+use reqwest;
+use scylla::{statement::Consistency, ExecutionProfile, Session, SessionBuilder};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
 pub mod batch;
 pub mod db;
+pub mod etl;
+pub mod fetch;
+pub mod parquet;
 pub mod task;
 pub mod types;
-use redis::AsyncCommands;
-use reqwest::{self};
-use scylla::{statement::Consistency, ExecutionProfile, SessionBuilder};
-use std::{
-    collections::HashSet,
-    time::{Duration, Instant},
-};
-use task::{complete_task, dequeue_task, enqueue_tasks, setup_task_table, ArtistTask};
-use tokio::{self, time::interval};
-use types::{Album, Artist, NormalizedTrack, Track};
-pub mod fetch;
-use std::error::Error;
-async fn process_artist(
-    artist_id: &str,
-    redis_client: &mut redis::aio::Connection,
-    session: &scylla::Session,
-    auth_token: &str,
-    client: &reqwest::Client,
-) -> Result<(), Box<dyn Error>> {
-    println!("Processing artist {:?}", artist_id);
-    let lock_key = format!("lock:artist:{}", artist_id);
-    let lock_result: bool = redis_client.set_nx(&lock_key, "locked").await?;
 
-    if !lock_result {
-        println!(
-            "Artist {} is already being processed by another instance",
-            artist_id
-        );
-        return Ok(());
-    }
+use db::setup_keyspace;
+use etl::process_artist;
+use fetch::{get_api_key, get_client};
+use task::{complete_task, enqueue_tasks, setup_task_table};
 
-    // Set expiration to prevent dead locks
-    redis_client.expire(&lock_key, 30).await?;
-
-    // Fetch albums
-    let albums_url = format!("{}/artists/{}/albums?limit=50", SPOTIFY_API_BASE, artist_id);
-    let albums_raw: Vec<Album> = fetch_all_items(&client, &albums_url, auth_token).await?;
-    println!("Fetched albums {:?}", albums_raw.len());
-
-    let all_tracks_base: Vec<Track> = fetch_albums_with_tracks(
-        &client,
-        albums_raw.iter().map(|a| a.id.as_str()).collect(),
-        &auth_token,
-    )
-    .await?;
-    let all_tracks: &Vec<NormalizedTrack> = &all_tracks_base
-        .clone()
-        .into_iter()
-        .filter(|t| t.artists.len() > 1)
-        .map(|track| NormalizedTrack {
-            id: track.id,
-            name: track.name,
-            preview_url: track.preview_url,
-            artists: track.artists.iter().map(|a| a.id.clone()).collect(),
-        })
-        .collect();
-    let all_artists = &all_tracks_base
-        .into_iter()
-        .flat_map(|t| t.artists)
-        .unique()
-        .collect::<Vec<_>>();
-
-    insert_data(&all_tracks, &all_artists, &session).await?;
-
-    println!("Mutated artist {:?}", artist_id);
-    let artist_id_set: HashSet<String> = all_artists.into_iter().map(|a| a.id.clone()).collect();
-    // // Check processed artists in Redis
-    let before = Instant::now();
-    let processed_artists: HashSet<String> = redis_client.smembers("processed_artists").await?;
-    println!("Fetched processed artists in {:?}", before.elapsed());
-    let unprocessed_artists: HashSet<_> = artist_id_set.difference(&processed_artists).collect();
-
-    // Send unprocessed artists to RabbitMQ
-    let before = Instant::now();
-    enqueue_tasks(
-        &session,
-        unprocessed_artists
-            .to_owned()
-            .into_iter()
-            .cloned()
-            .collect(),
-    )
-    .await?;
-    println!("Published artists to process in {:?}", before.elapsed());
-    println!(
-        "Published artists to process: {:?}",
-        unprocessed_artists.len()
-    );
-
-    // Mark initial artist as processed in Redis
-    let before = Instant::now();
-    redis_client.sadd("processed_artists", artist_id).await?;
-    redis_client.del(&lock_key).await?;
-    println!(
-        "Marked artist {:?} as processed in {:?}",
-        artist_id,
-        before.elapsed()
-    );
-
-    Ok(())
+struct AppState {
+    session: Arc<Session>,
+    redis_client: RedisClient,
+    http_client: reqwest::Client,
+    auth_token: Mutex<String>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+#[derive(Deserialize)]
+struct ArtistIds {
+    ids: Vec<String>,
+}
 
+#[derive(Serialize)]
+struct ProcessingResult {
+    successful: Vec<String>,
+    failed: Vec<String>,
+}
+async fn process_single_artist(
+    state: &web::types::State<Arc<AppState>>,
+    artist_id: &str,
+    retry_count: &mut i32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        let auth_token = state.auth_token.lock().await.clone();
+        match process_artist(
+            artist_id,
+            &state.redis_client,
+            &state.session,
+            &auth_token,
+            &state.http_client,
+        )
+        .await
+        {
+            Ok(_) => {
+                if let Err(e) = complete_task(&state.session, artist_id).await {
+                    return Err(e.into());
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                if *retry_count == 0 {
+                    let _ = refresh_token(state.get_ref().clone()).await;
+                    *retry_count += 1;
+                } else {
+                    if let Err(enqueue_err) =
+                        enqueue_tasks(&state.session, vec![artist_id.to_string()]).await
+                    {
+                        eprintln!("Error re-enqueueing task: {:?}", enqueue_err);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
+#[web::post("/process_artists")]
+async fn process_artists(
+    state: web::types::State<Arc<AppState>>,
+    artist_ids: web::types::Json<ArtistIds>,
+) -> Result<web::HttpResponse, web::Error> {
+    let mut successful = Vec::new();
+    let mut failed = Vec::new();
+    let mut retry_count = 0;
+
+    for artist_id in artist_ids.into_inner().ids.iter() {
+        let result = process_single_artist(&state, artist_id, &mut retry_count).await;
+        match result {
+            Ok(_) => successful.push(artist_id.clone()),
+            Err(_) => failed.push(artist_id.clone()),
+        }
+    }
+
+    Ok(ntex::web::HttpResponse::Ok().json(&ProcessingResult { successful, failed }))
+}
+#[web::get("/health")]
+async fn health(_: web::types::State<Arc<AppState>>) -> web::HttpResponse {
+    web::HttpResponse::Ok().body("OK")
+}
+#[ntex::main]
+async fn main() -> std::io::Result<()> {
     let uri = std::env::var("SCYLLA_URI").unwrap();
-
     let profile = ExecutionProfile::builder()
         .consistency(Consistency::One)
-        .request_timeout(None) // no request timeout
+        .request_timeout(None)
         .build();
-
     let handle = profile.into_handle();
-
-    let session: scylla::Session = SessionBuilder::new()
+    let session: Session = SessionBuilder::new()
         .default_execution_profile_handle(handle)
         .known_node(uri)
         .build()
-        .await?;
-    if let Ok(_) = std::env::var("TEST") {
-        let all_tracks = std::fs::read_to_string("tracks.json").expect("  failed to read file");
-        let all_tracks: Vec<NormalizedTrack> = serde_json::from_str(&all_tracks).expect("  failed to parse json");
-        let all_artists = std::fs::read_to_string("artists.json").expect("  failed to read file");
-        let all_artists: Vec<Artist> = serde_json::from_str(&all_artists).expect("  failed to parse json");
-        let mut total_time = 0.0;
-        for _ in 0..20 {
-            let before = Instant::now();
-        insert_data(&all_tracks, &all_artists, &session).await?;
-    
-            total_time += before.elapsed().as_secs_f64();
-        }
-        println!("Average time: {:?}", total_time / 20.0);
-        return Ok(());
-    };
-
-
-    // Redis setup
-    let redis_client = redis::Client::open(std::env::var("REDIS_URI").unwrap().as_str())?;
-    let mut redis_conn = redis_client.get_async_connection().await?;
-    println!("Redis client created");
-    // Consume messages
-
-
-    let mut last_token_timestamp = Instant::now();
+        .await
+        .expect("Failed to create Scylla session");
+    println!("Created Scylla session");
+    let config = RedisConfig::from_url(std::env::var("REDIS_URI").unwrap().as_str())
+        .expect("Failed to create Redis config");
+    let redis_client = fred::types::Builder::from_config(config)
+        .build()
+        .expect("Failed to create Redis client");
+    redis_client.connect();
+    redis_client
+        .wait_for_connect()
+        .await
+        .expect("Failed to connect to Redis");
+    println!("Connected to Redis");
     let http_client = get_client();
-    let mut last_token = get_api_key(&http_client).await?;
-    println!("Got token {:?}", last_token);
-    setup_keyspace(&session).await?;
-    println!("Created keyspace");
-    setup_task_table(&session).await?;
-    println!("Created task table");
+    let initial_token = get_api_key(&http_client)
+        .await
+        .expect("Failed to get initial API key");
+    println!("Got initial token");
+    setup_keyspace(&session)
+        .await
+        .expect("Failed to setup keyspace");
+    setup_task_table(&session)
+        .await
+        .expect("Failed to setup task table");
+    println!("Setup keyspace and task table");
+    let state = Arc::new(AppState {
+        session: Arc::new(session),
+        redis_client,
+        http_client,
+        auth_token: Mutex::new(initial_token),
+    });
 
-    let mut interval = interval(Duration::from_millis(1000));
+    web::HttpServer::new(move || {
+        web::App::new()
+            .state(state.clone())
+            .service(process_artists)
+            .service(health)
+    })
+    .bind(("127.0.0.1", 3000))?
+    .run()
+    .await
+}
+
+async fn refresh_token(state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3500));
     loop {
-        let unprocessed_artists = dequeue_task(&session).await?;
-        if let Some(ArtistTask { artist_id, .. }) = unprocessed_artists {
-            let now = Instant::now();
-            if now.duration_since(last_token_timestamp).as_secs() > 3500 {
-                last_token = get_api_key(&http_client).await?;
-                last_token_timestamp = now;
+        interval.tick().await;
+        match get_api_key(&state.http_client).await {
+            Ok(new_token) => {
+                let mut token = state.auth_token.lock().await;
+                *token = new_token;
             }
-
-            if let Err(e) = process_artist(
-                &artist_id,
-                &mut redis_conn,
-                &session,
-                &last_token,
-                &http_client,
-            )
-            .await
-            {
-                eprintln!("Error processing artist {}: {:?}", artist_id, e);
-                // Requeue the message
-                enqueue_tasks(&session, vec![artist_id]).await?;
-            } else {
-                complete_task(&session, &artist_id).await?;
-                println!("processed in {:?}", now.elapsed());
+            Err(e) => {
+                eprintln!("Failed to refresh token: {:?}", e);
             }
-        } else {
-            interval.tick().await;
         }
     }
 }

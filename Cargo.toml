@@ -9,15 +9,15 @@ edition = "2021"
 regex = "1.10.5"
 reqwest = { version = "0.12.5", features = ["json"] }
 tokio = { version = "1.38", features = ["full"] }
-lapin = "1.8"
 serde_json = "1.0"
-redis = { version = "0.21.0", features = ["tokio-comp"] }
 # backoff = { version = "0.4", features = ["tokio"] }
+# tower-http = { version = "0.5.1", features = ["full"] }
 serde = "1.0.204"
 futures = "0.3.30"
 scylla = "0.13.1"
 itertools = "0.13.0"
+fred = "9.0.3"
+ntex = { version = "2.0.3", features = ["tokio"] }
 # memoize = "0.4.2"
 # parquet = { version = "52.1.0", features = ["object_store"] }
 # arrow = "52.1.0"
-

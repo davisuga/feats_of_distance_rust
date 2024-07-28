@@ -1,7 +1,7 @@
-use std::{error::Error, future::IntoFuture, time::Instant, vec};
+use std::{error::Error, time::Instant};
 
 use futures::future::join;
-use scylla::{batch::Batch, serialize::batch::BatchValues, statement::Consistency, SessionBuilder};
+use scylla::statement::Consistency;
 
 use crate::{
     batch::chunked_parallel_batch,
@@ -16,8 +16,16 @@ pub async fn insert_data(
     let before = Instant::now();
 
     match join(
-        chunked_parallel_batch(&session, "INSERT INTO music.tracks (id, name, preview_url, artists) VALUES (?, ?, ?, ?)", &tracks),
-        chunked_parallel_batch(&session, "INSERT INTO music.artists (id, name) VALUES (?, ?)", &artists),
+        chunked_parallel_batch(
+            &session,
+            "INSERT INTO music.tracks (id, name, preview_url, artists) VALUES (?, ?, ?, ?)",
+            &tracks,
+        ),
+        chunked_parallel_batch(
+            &session,
+            "INSERT INTO music.artists (id, name) VALUES (?, ?)",
+            &artists,
+        ),
     )
     .await
     {

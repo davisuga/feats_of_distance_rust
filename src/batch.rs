@@ -1,7 +1,11 @@
 use futures::future::join_all;
 use itertools::Itertools;
 use scylla::{
-    batch::{Batch, BatchStatement}, serialize::{batch::BatchValues, row::SerializeRow}, statement::Consistency, transport::errors::QueryError, QueryResult, Session
+    batch::{Batch, BatchStatement},
+    serialize::row::SerializeRow,
+    statement::Consistency,
+    transport::errors::QueryError,
+    QueryResult, Session,
 };
 
 pub async fn chunked_parallel_batch<T, S>(
@@ -11,7 +15,7 @@ pub async fn chunked_parallel_batch<T, S>(
 ) -> Result<Vec<QueryResult>, QueryError>
 where
     T: SerializeRow + Sync + Send + Clone,
-    S: Into<BatchStatement>+Copy
+    S: Into<BatchStatement> + Copy,
 {
     const CHUNK_SIZE: usize = 700;
 

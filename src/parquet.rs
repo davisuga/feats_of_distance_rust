@@ -5,19 +5,17 @@
 
 // // }
 
-
 // fn write_to_parquet<T: Serialize + Clone+IntoSeries>(data: &Vec<NormalizedTrack>, file_path: &str) -> Result<(), PolarsError> {
 //     data.iter().for_each(|t| {
 //         println!("{:?}", t);
 //     });
 //     // Convert the data to a DataFrame
 //     let df = DataFrame::new(struct_to_dataframe!(data, [id, name, preview_url, artists]))?;
-    
+
 //     // Write the DataFrame to a Parquet file
 //     let mut file = std::fs::File::create("docs/data/path.parquet").unwrap();
 //     ParquetWriter::new(&mut file).finish(&mut df).unwrap();
-    
-    
+
 //     Ok(())
 // }
 

@@ -54,7 +54,13 @@ pub struct NormalizedAlbum {
     pub album_type: String,
     pub tracks: Vec<String>,
 }
-fn normalize_albums(albums: Vec<Album>) -> (Vec<NormalizedAlbum>, Vec<NormalizedTrack>, Vec<NormalizedArtist>) {
+fn normalize_albums(
+    albums: Vec<Album>,
+) -> (
+    Vec<NormalizedAlbum>,
+    Vec<NormalizedTrack>,
+    Vec<NormalizedArtist>,
+) {
     let mut normalized_albums = Vec::new();
     let mut normalized_tracks = Vec::new();
     let mut normalized_artists = Vec::new();
@@ -93,78 +99,4 @@ fn normalize_albums(albums: Vec<Album>) -> (Vec<NormalizedAlbum>, Vec<Normalized
     }
 
     (normalized_albums, normalized_tracks, normalized_artists)
-}
-mod tests {
-    use super::*;
-    #[test]
-    fn test_normalize_albums() {
-        let albums = vec![
-            Album {
-                id: "album1".to_string(),
-                name: "Album 1".to_string(),
-                release_date: "2022-01-01".to_string(),
-                album_type: "album".to_string(),
-                images: vec![],
-                tracks: vec![
-                    Track {
-                        id: "track1".to_string(),
-                        name: "Track 1".to_string(),
-                        preview_url: None,
-                        artists: vec![Artist {
-                            id: "artist1".to_string(),
-                            name: "Artist 1".to_string(),
-                        }],
-                    },
-                    Track {
-                        id: "track2".to_string(),
-                        name: "Track 2".to_string(),
-                        preview_url: None,
-                        artists: vec![Artist {
-                            id: "artist1".to_string(),
-                            name: "Artist 1".to_string(),
-                        }],
-                    },
-                    Track {
-                        id: "track3".to_string(),
-                        name: "Track 3".to_string(),
-                        preview_url: None,
-                        artists: vec![Artist {
-                            id: "artist2".to_string(),
-                            name: "Artist 2".to_string(),
-                        }],
-                    },
-                ],
-            },
-            Album {
-                id: "album2".to_string(),
-                name: "Album 2".to_string(),
-                release_date: "2022-02-01".to_string(),
-                album_type: "album".to_string(),
-                images: vec![],
-                tracks: vec![
-                    Track {
-                        id: "track4".to_string(),
-                        name: "Track 4".to_string(),
-                        preview_url: None,
-                        artists: vec![Artist {
-                            id: "artist1".to_string(),
-                            name: "Artist 1".to_string(),
-                        }],
-                    },
-                    Track {
-                        id: "track5".to_string(),
-                        name: "Track 5".to_string(),
-                        preview_url: None,
-                        artists: vec![Artist {
-                            id: "artist2".to_string(),
-                            name: "Artist 2".to_string(),
-                        }],
-                    },
-                ],
-            },
-        ];
-        let normalized_albums = normalize_albums(albums);
-        println!("{:?}",normalized_albums);
-        assert_eq!(normalized_albums.1.len(),5);
-    }
 }

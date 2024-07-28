@@ -6,7 +6,6 @@ enum ApiKeyError {
     TokenNotFound,
 }
 
-
 impl std::fmt::Display for ApiKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -31,10 +30,7 @@ impl From<regex::Error> for ApiKeyError {
     }
 }
 
-pub async fn get_api_key(
-    client: &reqwest::Client,
-) -> Result<String, Box<dyn Error>> {
- 
+pub async fn get_api_key(client: &reqwest::Client) -> Result<String, Box<dyn Error>> {
     let text = client
         .get("https://open.spotify.com")
         .send()
@@ -50,15 +46,14 @@ pub async fn get_api_key(
     }
     Err(Box::new(ApiKeyError::TokenNotFound))
 }
-use std::error::Error;
 use futures::{stream, StreamExt};
 use regex::Regex;
 use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::error::Error;
 
 use crate::types::Track;
-
 
 const CONCURRENT_REQUESTS: usize = 16;
 const TRACKS_LIMIT: usize = 20;
@@ -69,14 +64,12 @@ pub async fn fetch_albums_with_tracks(
     auth_token: &str,
 ) -> Result<Vec<Track>, Box<dyn Error>> {
     let album_chunks: Vec<Vec<&str>> = all_albums.chunks(20).map(|chunk| chunk.to_vec()).collect();
-    
+
     let albums_with_tracks = stream::iter(album_chunks)
         .map(|chunk| {
             let client = client.clone();
             let ids = chunk.join(",");
-            async move {
-                fetch_albums_with_initial_tracks(&client, &ids, auth_token).await
-            }
+            async move { fetch_albums_with_initial_tracks(&client, &ids, auth_token).await }
         })
         .buffer_unordered(CONCURRENT_REQUESTS)
         .collect::<Vec<_>>()
@@ -140,7 +133,9 @@ async fn fetch_albums_with_initial_tracks(
 
     if let Some(albums_array) = response["albums"].as_array() {
         for album in albums_array {
-            if let (Some(id), Some(total_tracks)) = (album["id"].as_str(), album["total_tracks"].as_u64()) {
+            if let (Some(id), Some(total_tracks)) =
+                (album["id"].as_str(), album["total_tracks"].as_u64())
+            {
                 albums.push(AlbumInfo {
                     id: id.to_string(),
                     total_tracks: total_tracks as usize,
@@ -166,7 +161,10 @@ async fn fetch_remaining_tracks(
     let mut offset = TRACKS_LIMIT;
 
     while offset < total_tracks {
-        let url = format!("{}/albums/{}/tracks?offset={}&limit=50", SPOTIFY_API_BASE, album_id, offset);
+        let url = format!(
+            "{}/albums/{}/tracks?offset={}&limit=50",
+            SPOTIFY_API_BASE, album_id, offset
+        );
         let response: Value = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", auth_token))
